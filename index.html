@@ -369,6 +369,7 @@
     var player = null, apiReady = false, pendingMode = null;
     var liveFallbackDone = false; /* true once a failed live embed has fallen back to YouTube */
     var autoSkipErrors = 0; /* consecutive failed videos in the current list — auto-skip guard (v1.15-test) */
+    var recoverIndex = 0; /* index to reload from when a list never registered with the player */
 
     window.onYouTubeIframeAPIReady = function () {
       apiReady = true;
@@ -610,13 +611,14 @@
       mode = m;
       autoSkipErrors = 0; /* a new list starts the failure count over */
       loadIndex = startIndex || 0;
+      recoverIndex = loadIndex;
       isPlaying = true;
       progress = { t: 0, d: 0 };
       videoTitle = m === "live" ? "Live Darshan" : (m === "streams" ? "JCGS Events" : (m === "shorts" ? "Reels" : (m === "playlist" ? (activePlaylistTitle || "Playlist") : (m === "favorites" ? "Favorites" : "JCGS Videos"))));
       mountPlayer(m);
       gotoNowPlaying();
     }
-    function loadSource(target, m) {
+    function loadSource(target, m, idx) {
       if (m === "live") {
         /* Nothing to load: the live player's iframe src IS the live
            embed (see makeYtIframe) — the resolved current live
@@ -625,8 +627,8 @@
       }
       else {
         if (m === "streams") target.loadPlaylist({ listType: "playlist", list: STREAMS_PLAYLIST, index: loadIndex });
-        else if (m === "shorts") target.loadPlaylist({ listType: "playlist", list: SHORTS_PLAYLIST, index: 0 });
-        else if (m === "playlist") target.loadPlaylist({ listType: "playlist", list: activePlaylistId, index: 0 });
+        else if (m === "shorts") target.loadPlaylist({ listType: "playlist", list: SHORTS_PLAYLIST, index: (idx == null ? loadIndex : idx) });
+        else if (m === "playlist") target.loadPlaylist({ listType: "playlist", list: activePlaylistId, index: (idx == null ? loadIndex : idx) });
         else if (m === "favorites") target.loadPlaylist(favorites.map(function (f) { return f.id; }), loadIndex);
         else target.loadPlaylist({ listType: "playlist", list: UPLOADS_PLAYLIST, index: loadIndex });
         try { target.setLoop(m === "favorites"); } catch (e) { /* player not ready */ }
@@ -793,18 +795,32 @@
           onError: function (e) {
             /* Live keeps its designed fallback. In a playlist mode a
                failed video now skips to the next one instead of
-               leaving YouTube's error screen up (v1.15-test). The
-               skip count stops after one full pass through the list,
-               so a wholly broken list (or no network) cannot loop
-               forever; it resets whenever a video starts playing or
-               a new section is opened. */
+               leaving YouTube's error screen up (v1.15-test). Two
+               cases: if the list already registered with the player,
+               step within it (stepTrack); if the error fired while
+               the list was still loading and the player knows no
+               list yet, reload the source one video further in.
+               The skip count stops after one full pass through the
+               list, so a wholly broken list (or no network) cannot
+               loop forever; it resets whenever a video starts
+               playing or a new section is opened. The toast makes
+               the skip visible while testing. */
             if (mode === "live") { livePlayError(); return; }
             if (mode !== "videos" && mode !== "shorts" && mode !== "streams" && mode !== "playlist" && mode !== "favorites") return;
-            var len = 0;
-            try { var pl = player && player.getPlaylist ? player.getPlaylist() : null; len = pl ? pl.length : 0; } catch (err) {}
-            var cap = len || 3;
+            var len = 0, idx = -1;
+            try {
+              var pl = player && player.getPlaylist ? player.getPlaylist() : null;
+              len = pl ? pl.length : 0;
+              idx = player && player.getPlaylistIndex ? player.getPlaylistIndex() : -1;
+            } catch (err) {}
             autoSkipErrors++;
-            if (autoSkipErrors < cap) stepTrack(1);
+            if (len > 0 && idx >= 0) {
+              if (autoSkipErrors < len) { toast("That video wouldn't load — trying the next one."); stepTrack(1); }
+            } else if (autoSkipErrors <= 3) {
+              recoverIndex++;
+              toast("That video wouldn't load — trying the next one.");
+              try { loadSource(player, mode, recoverIndex); } catch (err2) {}
+            }
           }
         }
       };
